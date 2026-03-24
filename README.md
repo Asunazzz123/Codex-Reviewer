@@ -18,7 +18,7 @@
     ├── codex-reviewer-workflow
     └── multi-codex-orchestrator
 
-16 directories, 17 files
+
 ```
 
 ## 初始化
