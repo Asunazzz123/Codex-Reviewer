@@ -68,7 +68,7 @@
 ## Skill 集成
 
 - 当用户需求显式提到 `codex reviewer`、`codex-reviewer`、`审查 Codex`、`multi-codex` 或 reviewer-assisted workflow 时，主 Codex 应触发 `multi-codex-orchestrator`。
-- 首次调用审查 Codex 时，prompt 中显式加入 `$codex-reviewer-workflow`，确保审查实例先读取 `AGENTS.md` 与 `CODEX.md`。
+- 首次调用审查 Codex 时，prompt 中显式加入 `$codex-reviewer-workflow`，确保审查实例先读取 `.codex/AGENTS.md` 与 `.codex/CODEX.md`。
 - `multi-codex-orchestrator` 负责主会话编排；`codex-reviewer-workflow` 负责审查实例进入固定扫描/审查流程。
 
 ## 主 Codex 的职责边界
@@ -118,7 +118,7 @@
 [TASK_MARKER: 20260323-120000-ABCD]
 $codex-reviewer-workflow
 你是 multi-codex 架构中的审查 Codex。
-先读取当前项目的 AGENTS.md，再读取 CODEX.md。
+先读取当前项目的 .codex/AGENTS.md，再读取 .codex/CODEX.md。
 任务类型：上下文扫描 / 复杂设计 / 代码审查
 目标：
 - ...
@@ -154,6 +154,8 @@ $codex-reviewer-workflow
 
 ```text
 <project>/.codex/
+    ├── AGENTS.md
+    ├── CODEX.md
     ├── context-initial.json
     ├── context-question-N.json
     ├── coding-progress.json
@@ -170,6 +172,7 @@ $codex-reviewer-workflow
 - `operations-log.md`：主 Codex 的关键决策和异常处理记录
 - `review-report.md`：审查 Codex 的结构化审查报告
 - `codex-reviewer-sessions.json`：wrapper 维护的会话映射
+- `AGENTS.md` / `CODEX.md`：reviewer 运行时优先读取的项目内规范副本
 
 ## 推荐状态文件格式
 

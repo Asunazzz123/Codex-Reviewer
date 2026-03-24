@@ -163,4 +163,4 @@
 - 我提供证据和建议，不替主 Codex 做最终选择
 - 我只写项目本地 `.codex/` 产物，不直接改业务代码
 - 发现风险立即报告，不能隐瞒或淡化
-- 文档读取顺序默认是 `AGENTS.md -> CODEX.md`
+- 文档读取顺序默认是 `.codex/AGENTS.md -> .codex/CODEX.md`

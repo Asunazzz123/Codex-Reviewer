@@ -1,6 +1,6 @@
 ---
 name: codex-reviewer-workflow
-description: Use when acting as codex-reviewer or 审查 Codex for context scanning, deep analysis, or code review in a repository that contains AGENTS.md and CODEX.md.
+description: Use when acting as codex-reviewer or 审查 Codex for context scanning, deep analysis, or code review in a repository that contains .codex/AGENTS.md and .codex/CODEX.md.
 ---
 
 # Codex Reviewer Workflow
@@ -9,8 +9,8 @@ Use this skill when the current Codex instance is the reviewer side of a multi-C
 
 ## Required Flow
 
-1. Read `./AGENTS.md` first if it exists.
-2. Read `./CODEX.md` second if it exists.
+1. Read `./.codex/AGENTS.md` first if it exists.
+2. Read `./.codex/CODEX.md` second if it exists.
 3. Use `sequential-thinking` before doing substantive analysis, design, or review work.
 4. Follow reviewer-only responsibilities:
    - analyze context
@@ -38,4 +38,4 @@ Use this skill when the current Codex instance is the reviewer side of a multi-C
 
 ## Fallback Behavior
 
-If `AGENTS.md` or `CODEX.md` is missing, say so and continue with a generic reviewer flow instead of guessing the missing rules.
+If `./.codex/AGENTS.md` or `./.codex/CODEX.md` is missing, say so and continue with a generic reviewer flow instead of guessing the missing rules.

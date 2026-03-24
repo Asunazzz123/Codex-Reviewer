@@ -97,10 +97,12 @@ def _extract_task_marker(prompt: str) -> tuple[str | None, str]:
 
 
 def _choose_docs(cwd: Path, framework_root: Path) -> dict[str, str | None]:
-    local_agents = cwd / "AGENTS.md"
-    local_codex = cwd / "CODEX.md"
-    framework_agents = framework_root / "AGENTS.md"
-    framework_codex = framework_root / "CODEX.md"
+    local_doc_root = cwd / ".codex"
+    framework_doc_root = framework_root / ".codex"
+    local_agents = local_doc_root / "AGENTS.md"
+    local_codex = local_doc_root / "CODEX.md"
+    framework_agents = framework_doc_root / "AGENTS.md"
+    framework_codex = framework_doc_root / "CODEX.md"
 
     chosen_agents = local_agents if local_agents.exists() else framework_agents if framework_agents.exists() else None
     chosen_main = local_codex if local_codex.exists() else framework_codex if framework_codex.exists() else None
@@ -155,14 +157,14 @@ def _build_prompt(
         lines.append(f"本轮优先产物路径：{artifact_path}")
     lines.append("文档读取顺序：")
     if docs["chosen_agents"]:
-        lines.append(f"1. 先读取 AGENTS.md：{docs['chosen_agents']}")
+        lines.append(f"1. 先读取 .codex/AGENTS.md：{docs['chosen_agents']}")
     else:
-        lines.append("1. 未找到 AGENTS.md；需要在输出中声明降级。")
+        lines.append("1. 未找到 .codex/AGENTS.md；需要在输出中声明降级。")
     if docs["chosen_main"]:
-        lines.append(f"2. 再读取主文档：{docs['chosen_main']}")
+        lines.append(f"2. 再读取 .codex/CODEX.md：{docs['chosen_main']}")
     else:
-        lines.append("2. 未找到 CODEX.md；需要在输出中声明降级。")
-    lines.append("如果项目内缺少这些文档，可以读取上面的框架文档作为降级方案，但必须明确说明。")
+        lines.append("2. 未找到 .codex/CODEX.md；需要在输出中声明降级。")
+    lines.append("如果项目内缺少这些文档，可以读取上面的框架 .codex 文档作为降级方案，但必须明确说明。")
     lines.append("只允许把 reviewer 产物写入项目本地 .codex/ 目录，不直接修改业务代码，除非显式覆盖。")
     if developer_instructions:
         lines.append("补充开发者约束：")
