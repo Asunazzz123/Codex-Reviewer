@@ -29,6 +29,6 @@ Windows
 
 Linux/Macosx
 ```
-bash setting.sh
+bash ./setting.sh
 ```
 全局配置不需要手动修改，需要代码审核的项目需要**手动迁移** 项目内的`.codex`
