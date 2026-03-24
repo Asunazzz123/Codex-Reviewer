@@ -1,0 +1,22 @@
+#!/bin/sh
+set -eu
+
+extensions_dir="${HOME}/.vscode/extensions"
+latest_codex=""
+
+for candidate in "${extensions_dir}"/openai.chatgpt-*-darwin-arm64/bin/macos-aarch64/codex; do
+  if [ ! -x "${candidate}" ]; then
+    continue
+  fi
+
+  if [ -z "${latest_codex}" ] || [ "${candidate}" -nt "${latest_codex}" ]; then
+    latest_codex="${candidate}"
+  fi
+done
+
+if [ -z "${latest_codex}" ]; then
+  echo "codex-latest: no executable codex binary found under ${extensions_dir}" >&2
+  exit 1
+fi
+
+exec "${latest_codex}" "$@"

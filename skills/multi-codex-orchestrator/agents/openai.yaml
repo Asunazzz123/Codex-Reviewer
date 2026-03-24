@@ -1,0 +1,4 @@
+interface:
+  display_name: "Multi-Codex Orchestrator"
+  short_description: "Coordinate main Codex with the stable codex-reviewer wrapper"
+  default_prompt: "Use codex-reviewer to scan, design, or review while keeping implementation in the main Codex session. Read CODEX.md first, and use the wrapper-returned structured conversation_id for follow-up review calls."

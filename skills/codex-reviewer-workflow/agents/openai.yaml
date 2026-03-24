@@ -1,0 +1,4 @@
+interface:
+  display_name: "Codex Reviewer Workflow"
+  short_description: "Reviewer-side workflow for the stable codex-reviewer wrapper"
+  default_prompt: "Act as the reviewer Codex: read AGENTS.md and CODEX.md, analyze evidence, write reviewer artifacts under .codex, and rely on the wrapper-managed conversation_id instead of inventing one."

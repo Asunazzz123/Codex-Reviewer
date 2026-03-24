@@ -1,0 +1,38 @@
+# ~/.codex/config.toml 的 multi-codex MCP 配置示例（macOS + conda）
+# 说明：
+# 1. MCP 统一通过 `/opt/anaconda3/bin/conda run -n base` 或本机 Python 启动。
+# 2. Node 仍使用你系统里的 `/usr/local/bin/node` 与 `/usr/local/bin/npx`。
+# 3. `codex-reviewer` 不再直接暴露通用 `codex mcp-server`，而是指向项目内的稳定 wrapper。
+# 4. wrapper 会负责捕获真实 `conversation_id`、写入项目本地 `.codex/codex-reviewer-sessions.json`，并引导 reviewer 优先读取 `AGENTS.md` 与 `CODEX.md`。
+
+[mcp_servers]
+
+[mcp_servers.sequential-thinking]
+type = "stdio"
+command = "/opt/anaconda3/bin/conda"
+args = ["run", "--no-capture-output", "-n", "base", "/usr/local/bin/npx", "-y", "@modelcontextprotocol/server-sequential-thinking"]
+env = { PATH = "/opt/anaconda3/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:/Users/asuna/.vscode/extensions/openai.chatgpt-26.313.41514-darwin-arm64/bin/macos-aarch64", HOME = "/Users/asuna" }
+
+[mcp_servers.shrimp-task-manager]
+type = "stdio"
+command = "/opt/anaconda3/bin/conda"
+args = ["run", "--no-capture-output", "-n", "base", "/usr/local/bin/npx", "-y", "mcp-shrimp-task-manager"]
+env = { PATH = "/opt/anaconda3/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:/Users/asuna/.vscode/extensions/openai.chatgpt-26.313.41514-darwin-arm64/bin/macos-aarch64", HOME = "/Users/asuna", DATA_DIR = ".shrimp", TEMPLATES_USE = "zh", ENABLE_GUI = "false" }
+
+[mcp_servers.codex-reviewer]
+type = "stdio"
+command = "/opt/anaconda3/bin/python3"
+args = ["/Users/asuna/Asuna/study&work/git/agentframework/scripts/codex_reviewer_mcp.py"]
+env = { PATH = "/opt/anaconda3/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin", HOME = "/Users/asuna", CODEX_BINARY = "/Users/asuna/.codex/bin/codex-latest", CODEX_REVIEWER_FRAMEWORK_ROOT = "/Users/asuna/Asuna/study&work/git/agentframework" }
+
+[mcp_servers.chrome-devtools]
+type = "stdio"
+command = "/opt/anaconda3/bin/conda"
+args = ["run", "--no-capture-output", "-n", "base", "/usr/local/bin/npx", "chrome-devtools-mcp@latest"]
+env = { PATH = "/opt/anaconda3/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:/Users/asuna/.vscode/extensions/openai.chatgpt-26.313.41514-darwin-arm64/bin/macos-aarch64", HOME = "/Users/asuna" }
+
+[mcp_servers.exa]
+type = "stdio"
+command = "/opt/anaconda3/bin/conda"
+args = ["run", "--no-capture-output", "-n", "base", "/usr/local/bin/npx", "-y", "exa-mcp-server"]
+env = { PATH = "/opt/anaconda3/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:/Users/asuna/.vscode/extensions/openai.chatgpt-26.313.41514-darwin-arm64/bin/macos-aarch64", HOME = "/Users/asuna", EXA_API_KEY = "your-exa-api-key" }
