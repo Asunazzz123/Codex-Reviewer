@@ -1,5 +1,5 @@
 # Codex Reviewer 迁移文档
-
+Codex 代码编写-代码审核 multi-agent, 参考[Claude Code+Codex](https://linux.do/t/topic/1003435?u=zhongruan)改造而成
 ## 内容
 ```plaintext
 .
