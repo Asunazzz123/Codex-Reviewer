@@ -31,4 +31,4 @@ Linux/Macosx
 ```
 bash ./setting.sh
 ```
-全局配置不需要手动修改，需要代码审核的项目需要**手动迁移** 项目内的`.codex`
+全局配置通常不需要随项目切换而修改。需要代码审核的项目只需要准备自己的 `.codex`；跨仓库调用 reviewer 时把 `cwd` 指向目标仓库即可。只有 reviewer framework 仓库位置发生变化时，才需要更新 `CODEX_REVIEWER_FRAMEWORK_ROOT`。

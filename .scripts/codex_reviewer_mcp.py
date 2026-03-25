@@ -646,6 +646,12 @@ def _handle_request(message: dict[str, Any]) -> dict[str, Any] | None:
     if method == "tools/list":
         return _json_rpc_result(message_id, {"tools": TOOLS})
 
+    if method == "resources/list":
+        return _json_rpc_result(message_id, {"resources": []})
+
+    if method == "resources/templates/list":
+        return _json_rpc_result(message_id, {"resourceTemplates": []})
+
     if method == "tools/call":
         params = message.get("params", {})
         tool_name = params.get("name")

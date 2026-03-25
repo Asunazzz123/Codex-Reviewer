@@ -166,3 +166,4 @@ echo "Copied skills to ${CODEX_SKILLS_DIR}"
 
 cp -r "${PROJECT_ROOT}/.scripts/." "$CODEX_SCRIPTS_DIR/"
 echo "Copied scripts to ${CODEX_SCRIPTS_DIR}"
+
