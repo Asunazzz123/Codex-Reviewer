@@ -7,6 +7,7 @@
 - 主 Codex 负责需求理解、任务规划、代码编写、本地验证与最终决策。
 - 审查 Codex 通过 MCP Server `codex-reviewer` 提供上下文收集、复杂逻辑设计和质量审查。
 - 稳定会话与 `conversation_id` 由 `codex-reviewer` MCP wrapper 负责捕获、持久化与返回，不再依赖审查模型自行拼接 `[CONVERSATION_ID]`。
+- reviewer 工具采用异步 job 模型：`codex` / `codex_reply` 先快速接单，主 Codex 通过 `review_status` 轮询结果与工件状态。
 - 目标不是简单把旧的 “Claude Code + Codex” 改名，而是把整套协作关系迁移为 `主 Codex + 审查 Codex` 的 multi-codex 模式。
 
 ### 主 Codex 的核心职责
@@ -50,11 +51,13 @@
 
 1. `sequential-thinking`
 2. `mcp__codex_reviewer__codex` 做上下文扫描
-3. `shrimp-task-manager` 生成任务计划
-4. 主 Codex 直接编码
-5. `mcp__codex_reviewer__codex_reply` 做复杂设计追问或最终审查
-6. `mcp__codex_reviewer__review_gate` 或其 CLI 等价检查必须通过
-7. 主 Codex 汇总结论、执行验证、写入最终决策
+3. `mcp__codex_reviewer__review_status` 轮询，直到 `conversation_id` 和/或 `context-initial.json` 就绪
+4. `shrimp-task-manager` 生成任务计划
+5. 主 Codex 直接编码
+6. `mcp__codex_reviewer__codex_reply` 做复杂设计追问或最终审查
+7. `mcp__codex_reviewer__review_status` 继续轮询，直到 `review-report.md` 就绪
+8. `mcp__codex_reviewer__review_gate` 或其 CLI 等价检查必须通过
+9. 主 Codex 汇总结论、执行验证、写入最终决策
 
 如果任务足够简单，可以跳过复杂设计，但不能跳过最终审查与 reviewer gate。
 
@@ -131,12 +134,23 @@ $codex-reviewer-workflow
 ```
 
 注意：首次工具返回值中的 `structuredContent.conversation_id` 才是续聊时应使用的真实会话 ID。
+如果首次返回还没有 `conversation_id`，主 Codex 必须改用 `review_status(job_id=...)` 轮询，不要假设同步调用会在一个长连接里直接返回最终结果。
 
 ### 继续会话
 
 - 工具：`mcp__codex_reviewer__codex_reply`
 - 传入之前记录的 `conversation_id`
 - 用于补充问题、要求复审、追问结论依据
+- 如果首次 `codex` 调用只返回了 `job_id`，先用 `review_status` 等到 `conversation_id` 可见，再发起 `codex_reply`
+
+### 状态轮询
+
+- 工具：`mcp__codex_reviewer__review_status`
+- 推荐用途：
+  - 按 `job_id` 轮询 reviewer 长任务
+  - 在 `conversation_id` 尚未返回时查询当前会话状态
+  - 判断工件是否已经落地，避免把超时链路误判为 reviewer 失败
+- 查询优先级：`job_id > conversation_id > task_marker`
 
 ### 完成前闸门
 
@@ -172,6 +186,7 @@ $codex-reviewer-workflow
     ├── context-question-N.json
     ├── coding-progress.json
     ├── operations-log.md
+    ├── reviewer-jobs/
     ├── review-report.md
     └── codex-reviewer-sessions.json
 ```
@@ -183,6 +198,7 @@ $codex-reviewer-workflow
 - `coding-progress.json`：主 Codex 的实时编码状态
 - `operations-log.md`：主 Codex 的关键决策和异常处理记录
 - `review-report.md`：审查 Codex 的结构化审查报告
+- `reviewer-jobs/`：异步 reviewer job 的运行状态与诊断信息
 - `codex-reviewer-sessions.json`：wrapper 维护的会话映射
 - `AGENTS.md` / `CODEX.md`：reviewer 运行时优先读取的项目内规范副本
 

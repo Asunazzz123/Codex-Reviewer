@@ -1,5 +1,6 @@
 tests/__pycache__/
 .codex/context-initial.json
+.codex/reviewer-jobs/
 ./pytest_cache
 codex.log
 codex_reviewer_mcp.patch

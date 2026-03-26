@@ -88,6 +88,8 @@
 
 - 新会话：主 Codex 在 prompt 第一行放入 `task_marker`，格式建议为 `[TASK_MARKER: YYYYMMDD-HHMMSS-XXXX]`。
 - `codex-reviewer` MCP wrapper 负责从 `codex exec --json` 的事件流和本地状态库中捕获真实 `conversation_id` / `thread_id`，并持久化到项目本地 `.codex/codex-reviewer-sessions.json`。
+- wrapper 使用异步 job 模型；首次 `tools/call` 可能只返回 `job_id`，主 Codex 需要通过 `review_status` 轮询等待 `conversation_id` 与工件落地。
+- `task_marker` 在持久化时会被规范化为裸值，例如 `20260326-151553-RETEST`；带方括号形式只用于 prompt 展示，不用于会话匹配。
 - 审查 Codex 不再需要自行猜测或手工回填 `conversation_id`；若 wrapper 已返回结构化结果，应以工具返回值为准。
 - 继续会话时由主 Codex 使用 `mcp__codex_reviewer__codex_reply`，传入前一轮工具返回的 `conversation_id`。
 
@@ -152,6 +154,7 @@
 - `.codex/context-initial.json`：初步扫描结果
 - `.codex/context-question-N.json`：单问题深挖
 - `.codex/review-report.md`：最终审查结果
+- `.codex/reviewer-jobs/`：异步 reviewer job 的状态与诊断信息
 - `.codex/codex-reviewer-sessions.json`：由 wrapper 维护的会话映射
 - MCP 工具返回中的 `structuredContent.conversation_id`：用于主 Codex 续聊
 

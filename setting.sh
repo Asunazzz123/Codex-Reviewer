@@ -184,7 +184,7 @@ echo "Copied codex-latest to ${CODEX_BIN_DIR}"
 cp -r "${PROJECT_ROOT}/skills/." "$CODEX_SKILLS_DIR/"
 echo "Copied skills to ${CODEX_SKILLS_DIR}"
 
-cp -r "${PROJECT_ROOT}/.scripts/." "$CODEX_SCRIPTS_DIR/"
+cp -r "${PROJECT_ROOT}/scripts/." "$CODEX_SCRIPTS_DIR/"
 echo "Copied scripts to ${CODEX_SCRIPTS_DIR}"
 
 echo "Running codex-reviewer doctor..."

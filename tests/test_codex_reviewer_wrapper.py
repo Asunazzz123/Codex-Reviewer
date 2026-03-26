@@ -1,13 +1,16 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 import sys
+import tempfile
+import time
 import unittest
 from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
-SERVER = ROOT / ".scripts" / "codex_reviewer_mcp.py"
+SERVER = ROOT / "scripts" / "codex_reviewer_mcp.py"
 
 SPEC = importlib.util.spec_from_file_location("codex_reviewer_mcp", SERVER)
 assert SPEC is not None and SPEC.loader is not None
@@ -138,6 +141,197 @@ class WrapperProtocolTests(unittest.TestCase):
         assert response is not None
         self.assertEqual(response["result"]["protocolVersion"], MODULE.PROTOCOL_VERSION)
         self.assertEqual(response["result"]["capabilities"], {"tools": {"listChanged": False}})
+
+
+class TaskMarkerAndJobTests(unittest.TestCase):
+    def test_normalize_task_marker_strips_brackets(self) -> None:
+        self.assertEqual(
+            MODULE._normalize_task_marker("[TASK_MARKER: 20260326-151553-RETEST]"),
+            "20260326-151553-RETEST",
+        )
+        self.assertEqual(MODULE._normalize_task_marker("20260326-151553-RETEST"), "20260326-151553-RETEST")
+
+    def test_save_session_deduplicates_normalized_task_marker(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            cwd = Path(temp_dir)
+            MODULE._ensure_artifact_root(cwd)
+
+            MODULE._save_session(
+                cwd=cwd,
+                task_marker="[TASK_MARKER: 20260326-151553-RETEST]",
+                conversation_id=None,
+                description="first",
+                status="queued",
+                artifact_paths=[".codex/context-initial.json"],
+            )
+            MODULE._save_session(
+                cwd=cwd,
+                task_marker="20260326-151553-RETEST",
+                conversation_id="thread-1",
+                description="second",
+                status="completed",
+                artifact_paths=[".codex/context-initial.json"],
+            )
+
+            sessions = MODULE._load_session_data(MODULE._session_file(cwd))["sessions"]
+            self.assertEqual(len(sessions), 1)
+            self.assertEqual(sessions[0]["task_marker"], "20260326-151553-RETEST")
+            self.assertEqual(sessions[0]["conversation_id"], "thread-1")
+
+    def test_find_active_job_reuses_running_job(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            cwd = Path(temp_dir)
+            MODULE._ensure_artifact_root(cwd)
+            job = MODULE._create_job_record(
+                tool_name="codex",
+                cwd=cwd,
+                framework_root=cwd,
+                task_marker="20260326-151553-RETEST",
+                conversation_id=None,
+                prompt="scan",
+                artifact_path=".codex/context-initial.json",
+                developer_instructions=None,
+                model="gpt-5.4",
+                profile=None,
+                sandbox="workspace-write",
+                approval_policy="on-request",
+                timeout_seconds=240,
+            )
+            job["status"] = "running"
+            MODULE._save_job(cwd, job)
+
+            existing = MODULE._find_active_job(
+                cwd,
+                tool_name="codex",
+                task_marker="[TASK_MARKER: 20260326-151553-RETEST]",
+                conversation_id=None,
+                artifact_path=".codex/context-initial.json",
+            )
+            self.assertIsNotNone(existing)
+            assert existing is not None
+            self.assertEqual(existing["job_id"], job["job_id"])
+
+    def test_review_status_prefers_job_id_then_conversation_then_task_marker(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            cwd = Path(temp_dir)
+            MODULE._ensure_artifact_root(cwd)
+            first = MODULE._create_job_record(
+                tool_name="codex",
+                cwd=cwd,
+                framework_root=cwd,
+                task_marker="marker-one",
+                conversation_id="thread-one",
+                prompt="scan one",
+                artifact_path=".codex/context-one.json",
+                developer_instructions=None,
+                model=None,
+                profile=None,
+                sandbox="workspace-write",
+                approval_policy="on-request",
+                timeout_seconds=240,
+            )
+            second = MODULE._create_job_record(
+                tool_name="codex_reply",
+                cwd=cwd,
+                framework_root=cwd,
+                task_marker="marker-two",
+                conversation_id="thread-two",
+                prompt="scan two",
+                artifact_path=".codex/context-two.json",
+                developer_instructions=None,
+                model=None,
+                profile=None,
+                sandbox="workspace-write",
+                approval_policy="on-request",
+                timeout_seconds=240,
+            )
+            first["status"] = "completed"
+            second["status"] = "completed"
+            MODULE._save_job(cwd, first)
+            time.sleep(0.01)
+            MODULE._save_job(cwd, second)
+
+            by_job_id = MODULE._review_status_payload(
+                cwd=cwd,
+                job_id=first["job_id"],
+                conversation_id="thread-two",
+                task_marker="marker-two",
+            )
+            self.assertEqual(by_job_id["job_id"], first["job_id"])
+
+            by_conversation = MODULE._review_status_payload(
+                cwd=cwd,
+                job_id=None,
+                conversation_id="thread-two",
+                task_marker="marker-one",
+            )
+            self.assertEqual(by_conversation["job_id"], second["job_id"])
+
+            by_marker = MODULE._review_status_payload(
+                cwd=cwd,
+                job_id=None,
+                conversation_id=None,
+                task_marker="[TASK_MARKER: marker-one]",
+            )
+            self.assertEqual(by_marker["job_id"], first["job_id"])
+
+    def test_janitor_marks_missing_running_pid_stale(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            cwd = Path(temp_dir)
+            MODULE._ensure_artifact_root(cwd)
+            job = MODULE._create_job_record(
+                tool_name="codex",
+                cwd=cwd,
+                framework_root=cwd,
+                task_marker="marker-stale",
+                conversation_id=None,
+                prompt="scan stale",
+                artifact_path=".codex/context.json",
+                developer_instructions=None,
+                model=None,
+                profile=None,
+                sandbox="workspace-write",
+                approval_policy="on-request",
+                timeout_seconds=240,
+            )
+            job["status"] = "running"
+            job["pid"] = 999_999_999
+            MODULE._save_job(cwd, job)
+
+            report = MODULE._run_job_janitor(cwd)
+            self.assertEqual(report["stale"], 1)
+            updated = MODULE._load_job(cwd, job["job_id"])
+            assert updated is not None
+            self.assertEqual(updated["status"], "stale")
+
+    def test_janitor_marks_old_queued_job_without_pid_failed(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            cwd = Path(temp_dir)
+            MODULE._ensure_artifact_root(cwd)
+            job = MODULE._create_job_record(
+                tool_name="codex",
+                cwd=cwd,
+                framework_root=cwd,
+                task_marker="marker-failed",
+                conversation_id=None,
+                prompt="scan failed",
+                artifact_path=".codex/context.json",
+                developer_instructions=None,
+                model=None,
+                profile=None,
+                sandbox="workspace-write",
+                approval_policy="on-request",
+                timeout_seconds=240,
+            )
+            job["created_at_unix"] = time.time() - MODULE.JOB_QUEUE_STALE_SECONDS - 5
+            job["status"] = "queued"
+            MODULE._save_job(cwd, job)
+
+            report = MODULE._run_job_janitor(cwd)
+            self.assertEqual(report["failed"], 1)
+            updated = MODULE._load_job(cwd, job["job_id"])
+            assert updated is not None
+            self.assertEqual(updated["status"], "failed")
 
 
 class CommandBuilderTests(unittest.TestCase):

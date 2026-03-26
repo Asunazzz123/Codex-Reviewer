@@ -13,6 +13,7 @@ import sys
 import tempfile
 import time
 import traceback
+import uuid
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -33,6 +34,11 @@ REVIEWER_STALE_SECONDS = 15 * 60
 DIAGNOSTIC_CHILD_SECONDS = 30
 TRANSPORT_JSONL = "jsonl"
 TRANSPORT_CONTENT_LENGTH = "content-length"
+JOB_DIRNAME = "reviewer-jobs"
+JOB_HEARTBEAT_SECONDS = 5
+JOB_QUEUE_STALE_SECONDS = 30
+OUTPUT_TAIL_LIMIT = 12000
+ACTIVE_JOB_STATUSES = {"queued", "running"}
 HOST_COMMAND_MARKERS = (
     "codex app-server",
     "Codex.app/Contents/Resources/codex app-server",
@@ -267,12 +273,77 @@ def _extract_task_marker(prompt: str) -> Tuple[Optional[str], str]:
     if not match:
         return None, prompt
     remaining = "\n".join(lines[1:]).strip()
-    return match.group(0), remaining
+    return match.group(1).strip(), remaining
+
+
+def _normalize_task_marker(task_marker: Optional[str]) -> Optional[str]:
+    if task_marker is None:
+        return None
+    stripped = str(task_marker).strip()
+    if not stripped:
+        return None
+    match = TASK_MARKER_PATTERN.match(stripped)
+    if match:
+        return match.group(1).strip()
+    return stripped
+
+
+def _render_task_marker(task_marker: Optional[str]) -> Optional[str]:
+    normalized = _normalize_task_marker(task_marker)
+    if not normalized:
+        return None
+    return f"[TASK_MARKER: {normalized}]"
+
+
+def _now_epoch() -> float:
+    return time.time()
+
+
+def _artifact_root(cwd: Path) -> Path:
+    return cwd / ".codex"
+
+
+def _jobs_root(cwd: Path) -> Path:
+    return _artifact_root(cwd) / JOB_DIRNAME
+
+
+def _job_file(cwd: Path, job_id: str) -> Path:
+    return _jobs_root(cwd) / f"{job_id}.json"
+
+
+def _write_json_atomic(path: Path, payload: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temp_path: Optional[Path] = None
+    try:
+        with tempfile.NamedTemporaryFile("w", dir=path.parent, delete=False, encoding="utf-8") as handle:
+            json.dump(payload, handle, ensure_ascii=False, indent=2)
+            handle.write("\n")
+            temp_path = Path(handle.name)
+        temp_path.replace(path)
+    finally:
+        if temp_path is not None and temp_path.exists():
+            try:
+                temp_path.unlink()
+            except OSError:
+                pass
+
+
+def _tail_text(value: str, limit: int = OUTPUT_TAIL_LIMIT) -> str:
+    return value[-limit:] if len(value) > limit else value
+
+
+def _json_or_default(path: Path, default: dict[str, Any]) -> dict[str, Any]:
+    if not path.exists():
+        return dict(default)
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return dict(default)
 
 
 def _choose_docs(cwd: Path, framework_root: Path) -> dict[str, Optional[str]]:
-    local_doc_root = cwd / ".codex"
-    framework_doc_root = framework_root / ".codex"
+    local_doc_root = _artifact_root(cwd)
+    framework_doc_root = _artifact_root(framework_root)
     local_agents = local_doc_root / "AGENTS.md"
     local_codex = local_doc_root / "CODEX.md"
     framework_agents = framework_doc_root / "AGENTS.md"
@@ -318,11 +389,12 @@ def _build_prompt(
 ) -> Tuple[str, dict[str, Optional[str]]]:
     docs = _choose_docs(cwd, framework_root)
     _, prompt_body = _extract_task_marker(prompt)
-    local_artifact_root = cwd / ".codex"
+    local_artifact_root = _artifact_root(cwd)
 
     lines = []
-    if task_marker:
-        lines.append(task_marker)
+    task_marker_line = _render_task_marker(task_marker)
+    if task_marker_line:
+        lines.append(task_marker_line)
     lines.append("$codex-reviewer-workflow")
     lines.append("你是 multi-codex 架构中的审查 Codex。")
     lines.append("会话与续聊由 MCP wrapper 管理：不要猜测、编造或手工回填 conversation_id。")
@@ -412,26 +484,22 @@ def _lookup_thread_id_from_state(cwd: Path, start_time: float) -> Optional[str]:
 
 
 def _session_file(cwd: Path) -> Path:
-    return cwd / ".codex" / "codex-reviewer-sessions.json"
+    return _artifact_root(cwd) / "codex-reviewer-sessions.json"
 
 
 def _ensure_artifact_root(cwd: Path) -> Path:
-    artifact_root = cwd / ".codex"
+    artifact_root = _artifact_root(cwd)
     artifact_root.mkdir(parents=True, exist_ok=True)
     return artifact_root
 
 
 def _load_session_data(path: Path) -> dict[str, Any]:
-    if not path.exists():
-        return {"updated_at": _now_shanghai(), "sessions": []}
-    try:
-        return json.loads(path.read_text(encoding="utf-8"))
-    except json.JSONDecodeError:
-        return {"updated_at": _now_shanghai(), "sessions": []}
+    return _json_or_default(path, {"updated_at": _now_shanghai(), "sessions": []})
 
 
 def _match_session(session: dict[str, Any], task_marker: Optional[str], conversation_id: Optional[str]) -> bool:
-    if task_marker and session.get("task_marker") == task_marker:
+    normalized_marker = _normalize_task_marker(task_marker)
+    if normalized_marker and session.get("task_marker") == normalized_marker:
         return True
     if conversation_id and session.get("conversation_id") == conversation_id:
         return True
@@ -462,18 +530,19 @@ def _save_session(
     gate_passed: bool = False,
     blocking_reason: Optional[str] = None,
 ) -> dict[str, Any]:
+    normalized_marker = _normalize_task_marker(task_marker)
     session_path = _session_file(cwd)
     data = _load_session_data(session_path)
     sessions = data.setdefault("sessions", [])
     existing = None
     for session in sessions:
-        if _match_session(session, task_marker, conversation_id):
+        if _match_session(session, normalized_marker, conversation_id):
             existing = session
             break
 
     if existing is None:
         existing = {
-            "task_marker": task_marker,
+            "task_marker": normalized_marker,
             "conversation_id": conversation_id,
             "created_at": _now_shanghai(),
         }
@@ -482,7 +551,8 @@ def _save_session(
     merged_artifacts = list(dict.fromkeys([*existing.get("artifact_paths", []), *artifact_paths]))
     existing.update(
         {
-            "conversation_id": conversation_id,
+            "task_marker": existing.get("task_marker") or normalized_marker,
+            "conversation_id": conversation_id or existing.get("conversation_id"),
             "updated_at": _now_shanghai(),
             "last_activity_at": _now_shanghai(),
             "cwd": str(cwd),
@@ -496,8 +566,203 @@ def _save_session(
         }
     )
     data["updated_at"] = _now_shanghai()
-    session_path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    _write_json_atomic(session_path, data)
     return existing
+
+
+def _new_job_id() -> str:
+    return uuid.uuid4().hex
+
+
+def _load_job(cwd: Path, job_id: str) -> Optional[dict[str, Any]]:
+    path = _job_file(cwd, job_id)
+    if not path.exists():
+        return None
+    return _json_or_default(path, {})
+
+
+def _job_artifact_exists(cwd: Path, artifact_paths: list[str]) -> bool:
+    if not artifact_paths:
+        return False
+    return all((cwd / artifact_path).resolve().exists() for artifact_path in artifact_paths)
+
+
+def _job_output_view(job: dict[str, Any]) -> dict[str, Any]:
+    cwd = Path(job["cwd"]).expanduser().resolve()
+    artifact_paths = list(job.get("artifact_paths", []))
+    return {
+        "server": SERVER_NAME,
+        "review_mode": job.get("review_mode", DEFAULT_REVIEW_MODE),
+        "job_id": job.get("job_id"),
+        "tool_name": job.get("tool_name"),
+        "task_marker": job.get("task_marker"),
+        "conversation_id": job.get("conversation_id"),
+        "status": job.get("status"),
+        "pid": job.get("pid"),
+        "created_at": job.get("created_at"),
+        "started_at": job.get("started_at"),
+        "heartbeat_at": job.get("heartbeat_at"),
+        "updated_at": job.get("updated_at"),
+        "artifact_paths": artifact_paths,
+        "artifact_exists": _job_artifact_exists(cwd, artifact_paths),
+        "returncode": job.get("returncode"),
+        "timed_out": bool(job.get("timed_out", False)),
+        "assistant_message": job.get("assistant_message", ""),
+        "stdout_tail": job.get("stdout_tail", ""),
+        "stderr_tail": job.get("stderr_tail", ""),
+    }
+
+
+def _create_job_record(
+    *,
+    tool_name: str,
+    cwd: Path,
+    framework_root: Path,
+    task_marker: Optional[str],
+    conversation_id: Optional[str],
+    prompt: str,
+    artifact_path: Optional[str],
+    developer_instructions: Optional[str],
+    model: Optional[str],
+    profile: Optional[str],
+    sandbox: Optional[str],
+    approval_policy: Optional[str],
+    timeout_seconds: int,
+) -> dict[str, Any]:
+    now_epoch = _now_epoch()
+    now_readable = _now_shanghai()
+    normalized_marker = _normalize_task_marker(task_marker)
+    artifact_paths = [artifact_path] if artifact_path else []
+    return {
+        "job_id": _new_job_id(),
+        "tool_name": tool_name,
+        "cwd": str(cwd),
+        "framework_root": str(framework_root),
+        "task_marker": normalized_marker,
+        "conversation_id": conversation_id,
+        "prompt": prompt,
+        "artifact_path": artifact_path,
+        "artifact_paths": artifact_paths,
+        "developer_instructions": developer_instructions,
+        "model": model,
+        "profile": profile,
+        "sandbox": sandbox,
+        "approval_policy": approval_policy,
+        "timeout_seconds": timeout_seconds,
+        "status": "queued",
+        "review_mode": DEFAULT_REVIEW_MODE,
+        "pid": None,
+        "created_at": now_readable,
+        "created_at_unix": now_epoch,
+        "started_at": None,
+        "started_at_unix": None,
+        "heartbeat_at": None,
+        "heartbeat_at_unix": None,
+        "updated_at": now_readable,
+        "updated_at_unix": now_epoch,
+        "returncode": None,
+        "timed_out": False,
+        "assistant_message": "",
+        "stdout_tail": "",
+        "stderr_tail": "",
+    }
+
+
+def _save_job(cwd: Path, job: dict[str, Any]) -> dict[str, Any]:
+    job = dict(job)
+    job["task_marker"] = _normalize_task_marker(job.get("task_marker"))
+    now_epoch = _now_epoch()
+    job.setdefault("created_at", _now_shanghai())
+    job.setdefault("created_at_unix", now_epoch)
+    job["updated_at"] = _now_shanghai()
+    job["updated_at_unix"] = now_epoch
+    _write_json_atomic(_job_file(cwd, str(job["job_id"])), job)
+    return job
+
+
+def _update_job(cwd: Path, job_id: str, **updates: Any) -> dict[str, Any]:
+    existing = _load_job(cwd, job_id)
+    if not existing:
+        raise FileNotFoundError(f"job not found: {job_id}")
+    now_epoch = _now_epoch()
+    now_readable = _now_shanghai()
+    if "heartbeat_at" in updates and updates["heartbeat_at"] is None:
+        updates["heartbeat_at_unix"] = None
+    elif "heartbeat_at" in updates:
+        updates.setdefault("heartbeat_at_unix", now_epoch)
+    if "started_at" in updates and updates["started_at"] is None:
+        updates["started_at_unix"] = None
+    elif "started_at" in updates:
+        updates.setdefault("started_at_unix", now_epoch)
+    if "task_marker" in updates:
+        updates["task_marker"] = _normalize_task_marker(updates["task_marker"])
+    existing.update(updates)
+    existing["updated_at"] = now_readable
+    existing["updated_at_unix"] = now_epoch
+    _write_json_atomic(_job_file(cwd, job_id), existing)
+    return existing
+
+
+def _list_jobs(cwd: Path) -> list[dict[str, Any]]:
+    jobs: list[dict[str, Any]] = []
+    jobs_dir = _jobs_root(cwd)
+    if not jobs_dir.exists():
+        return jobs
+    for path in jobs_dir.glob("*.json"):
+        payload = _json_or_default(path, {})
+        if payload.get("job_id"):
+            jobs.append(payload)
+    jobs.sort(key=lambda job: (job.get("updated_at_unix", 0), job.get("created_at_unix", 0), str(job.get("job_id", ""))))
+    return jobs
+
+
+def _find_job(
+    cwd: Path,
+    *,
+    job_id: Optional[str] = None,
+    conversation_id: Optional[str] = None,
+    task_marker: Optional[str] = None,
+) -> Optional[dict[str, Any]]:
+    if job_id:
+        return _load_job(cwd, job_id)
+
+    jobs = _list_jobs(cwd)
+    if conversation_id:
+        matches = [job for job in jobs if job.get("conversation_id") == conversation_id]
+        if matches:
+            return matches[-1]
+
+    normalized_marker = _normalize_task_marker(task_marker)
+    if normalized_marker:
+        matches = [job for job in jobs if job.get("task_marker") == normalized_marker]
+        if matches:
+            return matches[-1]
+
+    return None
+
+
+def _find_active_job(
+    cwd: Path,
+    *,
+    tool_name: str,
+    task_marker: Optional[str],
+    conversation_id: Optional[str],
+    artifact_path: Optional[str],
+) -> Optional[dict[str, Any]]:
+    normalized_marker = _normalize_task_marker(task_marker)
+    jobs = _list_jobs(cwd)
+    for job in reversed(jobs):
+        if job.get("tool_name") != tool_name:
+            continue
+        if job.get("status") not in ACTIVE_JOB_STATUSES:
+            continue
+        if (job.get("artifact_path") or None) != artifact_path:
+            continue
+        if normalized_marker and job.get("task_marker") == normalized_marker:
+            return job
+        if not normalized_marker and conversation_id and job.get("conversation_id") == conversation_id:
+            return job
+    return None
 
 
 def _approval_flags(approval_policy: Optional[str], sandbox: Optional[str]) -> list[str]:
@@ -520,6 +785,7 @@ def _run_codex_command(
     cmd: list[str],
     cwd: Path,
     timeout_seconds: int,
+    heartbeat_callback: Optional[Callable[[], None]] = None,
 ) -> Tuple[Optional[int], str, str, bool]:
     process = subprocess.Popen(
         cmd,
@@ -531,8 +797,17 @@ def _run_codex_command(
     )
     timed_out = False
     try:
-        stdout, stderr = process.communicate(timeout=timeout_seconds)
-        return process.returncode, stdout, stderr, timed_out
+        deadline = time.monotonic() + timeout_seconds
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise subprocess.TimeoutExpired(cmd=cmd, timeout=timeout_seconds)
+            try:
+                stdout, stderr = process.communicate(timeout=min(JOB_HEARTBEAT_SECONDS, remaining))
+                return process.returncode, stdout, stderr, timed_out
+            except subprocess.TimeoutExpired:
+                if heartbeat_callback is not None:
+                    heartbeat_callback()
     except subprocess.TimeoutExpired:
         timed_out = True
         process.kill()
@@ -622,6 +897,125 @@ def _base_payload(
     }
 
 
+def _job_status_to_blocking_reason(status: Optional[str]) -> Optional[str]:
+    if status in ACTIVE_JOB_STATUSES:
+        return "review_in_progress"
+    if status == "timeout":
+        return "review_timeout"
+    if status in {"error", "failed", "stale"}:
+        return "review_error"
+    return None
+
+
+def _watch_worker_process(process: subprocess.Popen[Any], job_id: str) -> None:
+    try:
+        returncode = process.wait()
+        _diagnostic_log("worker_reaped", job_id=job_id, pid=process.pid, returncode=returncode)
+    except Exception as exc:  # noqa: BLE001
+        _diagnostic_log("worker_reap_failed", job_id=job_id, pid=process.pid, error=str(exc))
+
+
+def _start_worker_reaper(process: subprocess.Popen[Any], job_id: str) -> None:
+    Thread(target=_watch_worker_process, args=(process, job_id), daemon=True).start()
+
+
+def _spawn_job_worker(cwd: Path, job_id: str) -> subprocess.Popen[Any]:
+    cmd = [
+        sys.executable,
+        str(Path(__file__).resolve()),
+        "run-job",
+        "--cwd",
+        str(cwd),
+        "--job-id",
+        job_id,
+    ]
+    process = subprocess.Popen(
+        cmd,
+        cwd=str(cwd),
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    _start_worker_reaper(process, job_id)
+    _diagnostic_log("worker_spawned", job_id=job_id, pid=process.pid, cwd=str(cwd))
+    return process
+
+
+def _run_job_janitor(cwd: Path) -> dict[str, int]:
+    _ensure_artifact_root(cwd)
+    now_epoch = _now_epoch()
+    stale_count = 0
+    failed_count = 0
+
+    for job in _list_jobs(cwd):
+        status = job.get("status")
+        if status not in ACTIVE_JOB_STATUSES:
+            continue
+
+        pid = job.get("pid")
+        if isinstance(pid, int) and pid > 0 and not _pid_exists(pid):
+            updated = _update_job(
+                cwd,
+                str(job["job_id"]),
+                status="stale",
+                heartbeat_at=_now_shanghai(),
+                stderr_tail=_tail_text(f"{job.get('stderr_tail', '')}\njanitor: recorded worker pid is no longer alive".strip()),
+            )
+            _save_session(
+                cwd=cwd,
+                task_marker=updated.get("task_marker"),
+                conversation_id=updated.get("conversation_id"),
+                description=updated.get("prompt", ""),
+                status="stale",
+                artifact_paths=list(updated.get("artifact_paths", [])),
+                review_mode=updated.get("review_mode"),
+                gate_passed=False,
+                blocking_reason="review_error",
+            )
+            stale_count += 1
+            continue
+
+        if status == "queued" and not pid:
+            created_at_unix = float(job.get("created_at_unix") or 0)
+            if created_at_unix and (now_epoch - created_at_unix) >= JOB_QUEUE_STALE_SECONDS:
+                updated = _update_job(
+                    cwd,
+                    str(job["job_id"]),
+                    status="failed",
+                    stderr_tail=_tail_text(f"{job.get('stderr_tail', '')}\njanitor: queued job never reported a worker pid".strip()),
+                )
+                _save_session(
+                    cwd=cwd,
+                    task_marker=updated.get("task_marker"),
+                    conversation_id=updated.get("conversation_id"),
+                    description=updated.get("prompt", ""),
+                    status="failed",
+                    artifact_paths=list(updated.get("artifact_paths", [])),
+                    review_mode=updated.get("review_mode"),
+                    gate_passed=False,
+                    blocking_reason="review_error",
+                )
+                failed_count += 1
+
+    if stale_count or failed_count:
+        _diagnostic_log("job_janitor", cwd=str(cwd), stale_count=stale_count, failed_count=failed_count)
+    return {"stale": stale_count, "failed": failed_count}
+
+
+def _review_status_payload(
+    *,
+    cwd: Path,
+    job_id: Optional[str],
+    conversation_id: Optional[str],
+    task_marker: Optional[str],
+) -> dict[str, Any]:
+    _run_job_janitor(cwd)
+    job = _find_job(cwd, job_id=job_id, conversation_id=conversation_id, task_marker=task_marker)
+    if not job:
+        raise ValueError("review job not found")
+    return _job_output_view(job)
+
+
 def _review_gate_payload(
     *,
     cwd: Path,
@@ -630,60 +1024,196 @@ def _review_gate_payload(
     task_marker: Optional[str],
     allow_local_fallback: bool,
 ) -> dict[str, Any]:
+    _run_job_janitor(cwd)
     artifact_rel = artifact_path or DEFAULT_REVIEW_ARTIFACT
     artifact_abs = (cwd / artifact_rel).resolve()
     artifact_exists = artifact_abs.exists()
+    job = _find_job(cwd, conversation_id=conversation_id, task_marker=task_marker)
     session = _find_session(cwd, task_marker=task_marker, conversation_id=conversation_id)
-    session_status = session.get("status", "missing") if session else "missing"
-    resolved_conversation_id = session.get("conversation_id") if session else conversation_id
-    review_mode = session.get("review_mode") if session else None
+    session_status = "missing"
+    resolved_conversation_id = conversation_id
+    review_mode: Optional[str] = None
     blocking_reason: Optional[str] = None
     gate_passed = False
 
-    if session_status == "completed" and artifact_exists:
+    if job:
+        session_status = job.get("status", "missing")
+        resolved_conversation_id = job.get("conversation_id") or resolved_conversation_id
+        review_mode = job.get("review_mode")
+    elif session:
+        session_status = session.get("status", "missing")
+        resolved_conversation_id = session.get("conversation_id") or resolved_conversation_id
+        review_mode = session.get("review_mode")
+
+    if session_status in ACTIVE_JOB_STATUSES:
+        blocking_reason = "review_in_progress"
+    elif session_status == "completed" and artifact_exists:
         gate_passed = True
         review_mode = review_mode or (DEFAULT_REVIEW_MODE if resolved_conversation_id else "local_fallback")
-    elif session_status in {"running", "pending"}:
-        blocking_reason = "review_in_progress"
-    elif session_status == "timeout":
-        blocking_reason = "review_timeout"
-    elif session_status == "error":
-        blocking_reason = "review_error"
     elif allow_local_fallback and artifact_exists:
         gate_passed = True
         review_mode = "local_fallback"
         session_status = "completed"
+    elif session_status in {"timeout", "error", "failed", "stale"}:
+        blocking_reason = _job_status_to_blocking_reason(session_status)
     elif not artifact_exists:
         blocking_reason = "review_artifact_missing"
     else:
         blocking_reason = "review_session_missing"
 
-    if session or (gate_passed and review_mode == "local_fallback"):
-        _save_session(
-            cwd=cwd,
-            task_marker=task_marker or (session.get("task_marker") if session else None),
-            conversation_id=resolved_conversation_id,
-            description="review-gate validation",
-            status=session_status,
-            artifact_paths=[artifact_rel],
-            review_mode=review_mode or DEFAULT_REVIEW_MODE,
-            gate_passed=gate_passed,
-            blocking_reason=blocking_reason,
-        )
-
     return {
         "server": SERVER_NAME,
         "cwd": str(cwd),
+        "job_id": job.get("job_id") if job else None,
         "artifact_path": artifact_rel,
         "artifact_exists": artifact_exists,
         "conversation_id": resolved_conversation_id,
-        "task_marker": task_marker or (session.get("task_marker") if session else None),
+        "task_marker": _normalize_task_marker(task_marker) or (session.get("task_marker") if session else None),
         "review_mode": review_mode or "unknown",
         "session_status": session_status,
         "gate_passed": gate_passed,
         "blocking_reason": blocking_reason,
         "allow_local_fallback": allow_local_fallback,
     }
+
+
+def _queue_job(
+    *,
+    tool_name: str,
+    prompt: str,
+    cwd: Path,
+    framework_root: Path,
+    task_marker: Optional[str],
+    conversation_id: Optional[str],
+    artifact_path: Optional[str],
+    developer_instructions: Optional[str],
+    timeout_seconds: int,
+    model: Optional[str],
+    profile: Optional[str],
+    sandbox: Optional[str],
+    approval_policy: Optional[str],
+    dry_run: bool,
+) -> dict[str, Any]:
+    normalized_marker = _normalize_task_marker(task_marker)
+    _ensure_artifact_root(cwd)
+    _run_job_janitor(cwd)
+
+    docs = _choose_docs(cwd, framework_root)
+    with tempfile.TemporaryDirectory(prefix=f"codex-reviewer-{tool_name}-") as temp_dir:
+        output_path = Path(temp_dir) / "last-message.txt"
+        if tool_name == "codex":
+            wrapped_prompt, docs = _build_prompt(
+                prompt=prompt,
+                cwd=cwd,
+                framework_root=framework_root,
+                artifact_path=artifact_path,
+                developer_instructions=developer_instructions,
+                task_marker=normalized_marker,
+            )
+            cmd = _build_exec_command(
+                codex_binary=_codex_binary(),
+                prompt=wrapped_prompt,
+                output_path=output_path,
+                cwd=cwd,
+                framework_root=framework_root,
+                model=model,
+                profile=profile,
+                sandbox=sandbox,
+                approval_policy=approval_policy,
+            )
+        else:
+            cmd = _build_resume_command(
+                codex_binary=_codex_binary(),
+                conversation_id=str(conversation_id),
+                prompt=prompt,
+                output_path=output_path,
+                cwd=cwd,
+                model=model,
+                profile=profile,
+                sandbox=sandbox,
+                approval_policy=approval_policy,
+            )
+
+    payload = _base_payload(
+        cmd=cmd,
+        cwd=cwd,
+        docs=docs,
+        task_marker=normalized_marker,
+        artifact_path=artifact_path,
+        timeout_seconds=timeout_seconds,
+    )
+    payload["conversation_id"] = conversation_id
+    if dry_run:
+        payload.update({"status": "dry_run", "assistant_message": "", "review_mode": DEFAULT_REVIEW_MODE})
+        return _tool_result(payload)
+
+    existing = _find_active_job(
+        cwd,
+        tool_name=tool_name,
+        task_marker=normalized_marker,
+        conversation_id=conversation_id,
+        artifact_path=artifact_path,
+    )
+    if existing:
+        payload.update(_job_output_view(existing))
+        payload["reused_existing_job"] = True
+        return _tool_result(payload)
+
+    job = _create_job_record(
+        tool_name=tool_name,
+        cwd=cwd,
+        framework_root=framework_root,
+        task_marker=normalized_marker,
+        conversation_id=conversation_id,
+        prompt=prompt,
+        artifact_path=artifact_path,
+        developer_instructions=developer_instructions,
+        model=model,
+        profile=profile,
+        sandbox=sandbox,
+        approval_policy=approval_policy,
+        timeout_seconds=timeout_seconds,
+    )
+    _save_job(cwd, job)
+    _save_session(
+        cwd=cwd,
+        task_marker=normalized_marker,
+        conversation_id=conversation_id,
+        description=prompt,
+        status="queued",
+        artifact_paths=list(job.get("artifact_paths", [])),
+        review_mode=DEFAULT_REVIEW_MODE,
+        gate_passed=False,
+        blocking_reason="review_in_progress",
+    )
+
+    try:
+        _spawn_job_worker(cwd, str(job["job_id"]))
+    except OSError as exc:
+        failed_job = _update_job(
+            cwd,
+            str(job["job_id"]),
+            status="failed",
+            stderr_tail=_tail_text(str(exc)),
+        )
+        _save_session(
+            cwd=cwd,
+            task_marker=failed_job.get("task_marker"),
+            conversation_id=failed_job.get("conversation_id"),
+            description=prompt,
+            status="failed",
+            artifact_paths=list(failed_job.get("artifact_paths", [])),
+            review_mode=DEFAULT_REVIEW_MODE,
+            gate_passed=False,
+            blocking_reason="review_error",
+        )
+        payload.update(_job_output_view(failed_job))
+        payload["reused_existing_job"] = False
+        return _tool_result(payload, is_error=True)
+
+    payload.update(_job_output_view(job))
+    payload["reused_existing_job"] = False
+    return _tool_result(payload)
 
 
 def _handle_codex(arguments: dict[str, Any]) -> dict[str, Any]:
@@ -701,87 +1231,22 @@ def _handle_codex(arguments: dict[str, Any]) -> dict[str, Any]:
     sandbox = args.get("sandbox") or "workspace-write"
     approval_policy = args.get("approval_policy") or "on-request"
     dry_run = bool(args.get("dry_run"))
-
-    _ensure_artifact_root(cwd)
-    wrapped_prompt, docs = _build_prompt(
+    return _queue_job(
+        tool_name="codex",
         prompt=prompt,
         cwd=cwd,
         framework_root=framework_root,
+        task_marker=task_marker,
+        conversation_id=None,
         artifact_path=artifact_path,
         developer_instructions=developer_instructions,
-        task_marker=task_marker,
+        timeout_seconds=timeout_seconds,
+        model=model,
+        profile=profile,
+        sandbox=sandbox,
+        approval_policy=approval_policy,
+        dry_run=dry_run,
     )
-
-    with tempfile.TemporaryDirectory(prefix="codex-reviewer-") as temp_dir:
-        output_path = Path(temp_dir) / "last-message.txt"
-        cmd = _build_exec_command(
-            codex_binary=_codex_binary(),
-            prompt=wrapped_prompt,
-            output_path=output_path,
-            cwd=cwd,
-            framework_root=framework_root,
-            model=model,
-            profile=profile,
-            sandbox=sandbox,
-            approval_policy=approval_policy,
-        )
-        payload = _base_payload(
-            cmd=cmd,
-            cwd=cwd,
-            docs=docs,
-            task_marker=task_marker,
-            artifact_path=artifact_path,
-            timeout_seconds=timeout_seconds,
-        )
-        if dry_run:
-            payload.update({"status": "dry_run", "conversation_id": None, "assistant_message": "", "review_mode": DEFAULT_REVIEW_MODE})
-            return _tool_result(payload)
-
-        _save_session(
-            cwd=cwd,
-            task_marker=task_marker,
-            conversation_id=None,
-            description=prompt,
-            status="running",
-            artifact_paths=[path for path in [artifact_path] if path],
-            review_mode=DEFAULT_REVIEW_MODE,
-            gate_passed=False,
-            blocking_reason="review_in_progress",
-        )
-
-        start_time = time.time()
-        returncode, stdout, stderr, timed_out = _run_codex_command(cmd=cmd, cwd=cwd, timeout_seconds=timeout_seconds)
-        conversation_id = _extract_thread_id_from_events(stdout) or _lookup_thread_id_from_state(cwd, start_time)
-        assistant_message = _last_message(output_path)
-        status = "timeout" if timed_out else "completed" if returncode == 0 else "error"
-        artifact_paths = [path for path in [artifact_path] if path]
-
-        _save_session(
-            cwd=cwd,
-            task_marker=task_marker,
-            conversation_id=conversation_id,
-            description=prompt,
-            status=status,
-            artifact_paths=artifact_paths,
-            review_mode=DEFAULT_REVIEW_MODE,
-            gate_passed=False,
-            blocking_reason=None if status == "completed" else "review_timeout" if timed_out else "review_error",
-        )
-
-        payload.update(
-            {
-                "status": status,
-                "conversation_id": conversation_id,
-                "assistant_message": assistant_message,
-                "stdout": stdout[-12000:],
-                "stderr": stderr[-12000:],
-                "returncode": returncode,
-                "timed_out": timed_out,
-                "artifact_paths": artifact_paths,
-                "review_mode": DEFAULT_REVIEW_MODE,
-            }
-        )
-        return _tool_result(payload, is_error=status == "error")
 
 
 def _handle_codex_reply(arguments: dict[str, Any]) -> dict[str, Any]:
@@ -801,78 +1266,34 @@ def _handle_codex_reply(arguments: dict[str, Any]) -> dict[str, Any]:
     sandbox = args.get("sandbox") or "workspace-write"
     approval_policy = args.get("approval_policy") or "on-request"
     dry_run = bool(args.get("dry_run"))
+    return _queue_job(
+        tool_name="codex_reply",
+        prompt=prompt,
+        cwd=cwd,
+        framework_root=framework_root,
+        task_marker=task_marker,
+        conversation_id=str(conversation_id),
+        artifact_path=artifact_path,
+        developer_instructions=None,
+        timeout_seconds=timeout_seconds,
+        model=model,
+        profile=profile,
+        sandbox=sandbox,
+        approval_policy=approval_policy,
+        dry_run=dry_run,
+    )
 
-    _ensure_artifact_root(cwd)
-    docs = _choose_docs(cwd, framework_root)
 
-    with tempfile.TemporaryDirectory(prefix="codex-reviewer-reply-") as temp_dir:
-        output_path = Path(temp_dir) / "last-message.txt"
-        cmd = _build_resume_command(
-            codex_binary=_codex_binary(),
-            conversation_id=str(conversation_id),
-            prompt=prompt,
-            output_path=output_path,
-            cwd=cwd,
-            model=model,
-            profile=profile,
-            sandbox=sandbox,
-            approval_policy=approval_policy,
-        )
-        payload = _base_payload(
-            cmd=cmd,
-            cwd=cwd,
-            docs=docs,
-            task_marker=task_marker,
-            artifact_path=artifact_path,
-            timeout_seconds=timeout_seconds,
-        )
-        payload["conversation_id"] = conversation_id
-        if dry_run:
-            payload.update({"status": "dry_run", "assistant_message": "", "review_mode": DEFAULT_REVIEW_MODE})
-            return _tool_result(payload)
-
-        _save_session(
-            cwd=cwd,
-            task_marker=task_marker,
-            conversation_id=str(conversation_id),
-            description=prompt,
-            status="running",
-            artifact_paths=[path for path in [artifact_path] if path],
-            review_mode=DEFAULT_REVIEW_MODE,
-            gate_passed=False,
-            blocking_reason="review_in_progress",
-        )
-
-        returncode, stdout, stderr, timed_out = _run_codex_command(cmd=cmd, cwd=cwd, timeout_seconds=timeout_seconds)
-        assistant_message = _last_message(output_path)
-        status = "timeout" if timed_out else "completed" if returncode == 0 else "error"
-        artifact_paths = [path for path in [artifact_path] if path]
-
-        _save_session(
-            cwd=cwd,
-            task_marker=task_marker,
-            conversation_id=str(conversation_id),
-            description=prompt,
-            status=status,
-            artifact_paths=artifact_paths,
-            review_mode=DEFAULT_REVIEW_MODE,
-            gate_passed=False,
-            blocking_reason=None if status == "completed" else "review_timeout" if timed_out else "review_error",
-        )
-
-        payload.update(
-            {
-                "status": status,
-                "assistant_message": assistant_message,
-                "stdout": stdout[-12000:],
-                "stderr": stderr[-12000:],
-                "returncode": returncode,
-                "timed_out": timed_out,
-                "artifact_paths": artifact_paths,
-                "review_mode": DEFAULT_REVIEW_MODE,
-            }
-        )
-        return _tool_result(payload, is_error=status == "error")
+def _handle_review_status(arguments: dict[str, Any]) -> dict[str, Any]:
+    args = _normalize_args(arguments)
+    cwd = Path(args.get("cwd") or os.getcwd()).expanduser().resolve()
+    payload = _review_status_payload(
+        cwd=cwd,
+        job_id=args.get("job_id"),
+        conversation_id=args.get("conversation_id"),
+        task_marker=args.get("task_marker"),
+    )
+    return _tool_result(payload)
 
 
 def _handle_review_gate(arguments: dict[str, Any]) -> dict[str, Any]:
@@ -890,6 +1311,148 @@ def _handle_review_gate(arguments: dict[str, Any]) -> dict[str, Any]:
         allow_local_fallback=allow_local_fallback,
     )
     return _tool_result(payload, is_error=not payload["gate_passed"])
+
+
+def _run_job_worker(cwd: Path, job_id: str) -> int:
+    _ensure_artifact_root(cwd)
+    job = _load_job(cwd, job_id)
+    if not job:
+        raise FileNotFoundError(f"job not found: {job_id}")
+
+    framework_root = Path(job.get("framework_root") or _framework_root()).expanduser().resolve()
+    tool_name = str(job["tool_name"])
+    prompt = str(job["prompt"])
+    artifact_paths = list(job.get("artifact_paths", []))
+
+    _update_job(
+        cwd,
+        job_id,
+        status="running",
+        pid=os.getpid(),
+        started_at=_now_shanghai(),
+        heartbeat_at=_now_shanghai(),
+    )
+    _save_session(
+        cwd=cwd,
+        task_marker=job.get("task_marker"),
+        conversation_id=job.get("conversation_id"),
+        description=prompt,
+        status="running",
+        artifact_paths=artifact_paths,
+        review_mode=job.get("review_mode"),
+        gate_passed=False,
+        blocking_reason="review_in_progress",
+    )
+
+    def _touch_heartbeat() -> None:
+        try:
+            _update_job(cwd, job_id, heartbeat_at=_now_shanghai())
+        except FileNotFoundError:
+            return
+
+    try:
+        with tempfile.TemporaryDirectory(prefix=f"codex-reviewer-worker-{tool_name}-") as temp_dir:
+            output_path = Path(temp_dir) / "last-message.txt"
+            timeout_seconds = int(job.get("timeout_seconds") or 240)
+            if tool_name == "codex":
+                wrapped_prompt, _ = _build_prompt(
+                    prompt=prompt,
+                    cwd=cwd,
+                    framework_root=framework_root,
+                    artifact_path=job.get("artifact_path"),
+                    developer_instructions=job.get("developer_instructions"),
+                    task_marker=job.get("task_marker"),
+                )
+                cmd = _build_exec_command(
+                    codex_binary=_codex_binary(),
+                    prompt=wrapped_prompt,
+                    output_path=output_path,
+                    cwd=cwd,
+                    framework_root=framework_root,
+                    model=job.get("model"),
+                    profile=job.get("profile"),
+                    sandbox=job.get("sandbox"),
+                    approval_policy=job.get("approval_policy"),
+                )
+                start_time = time.time()
+                returncode, stdout, stderr, timed_out = _run_codex_command(
+                    cmd=cmd,
+                    cwd=cwd,
+                    timeout_seconds=timeout_seconds,
+                    heartbeat_callback=_touch_heartbeat,
+                )
+                conversation_id = _extract_thread_id_from_events(stdout) or _lookup_thread_id_from_state(cwd, start_time)
+            elif tool_name == "codex_reply":
+                cmd = _build_resume_command(
+                    codex_binary=_codex_binary(),
+                    conversation_id=str(job.get("conversation_id")),
+                    prompt=prompt,
+                    output_path=output_path,
+                    cwd=cwd,
+                    model=job.get("model"),
+                    profile=job.get("profile"),
+                    sandbox=job.get("sandbox"),
+                    approval_policy=job.get("approval_policy"),
+                )
+                returncode, stdout, stderr, timed_out = _run_codex_command(
+                    cmd=cmd,
+                    cwd=cwd,
+                    timeout_seconds=timeout_seconds,
+                    heartbeat_callback=_touch_heartbeat,
+                )
+                conversation_id = job.get("conversation_id")
+            else:
+                raise ValueError(f"unsupported job tool: {tool_name}")
+
+            assistant_message = _last_message(output_path)
+            status = "timeout" if timed_out else "completed" if returncode == 0 else "error"
+            updated = _update_job(
+                cwd,
+                job_id,
+                conversation_id=conversation_id,
+                status=status,
+                heartbeat_at=_now_shanghai(),
+                returncode=returncode,
+                timed_out=timed_out,
+                assistant_message=assistant_message,
+                stdout_tail=_tail_text(stdout),
+                stderr_tail=_tail_text(stderr),
+            )
+            _save_session(
+                cwd=cwd,
+                task_marker=updated.get("task_marker"),
+                conversation_id=updated.get("conversation_id"),
+                description=prompt,
+                status=status,
+                artifact_paths=list(updated.get("artifact_paths", [])),
+                review_mode=updated.get("review_mode"),
+                gate_passed=False,
+                blocking_reason=_job_status_to_blocking_reason(status),
+            )
+            return 0 if status == "completed" else 1
+    except Exception:  # noqa: BLE001
+        trace = traceback.format_exc()
+        updated = _update_job(
+            cwd,
+            job_id,
+            status="error",
+            heartbeat_at=_now_shanghai(),
+            timed_out=False,
+            stderr_tail=_tail_text(trace),
+        )
+        _save_session(
+            cwd=cwd,
+            task_marker=updated.get("task_marker"),
+            conversation_id=updated.get("conversation_id"),
+            description=prompt,
+            status="error",
+            artifact_paths=list(updated.get("artifact_paths", [])),
+            review_mode=updated.get("review_mode"),
+            gate_passed=False,
+            blocking_reason="review_error",
+        )
+        _diagnostic_log("worker_failed", job_id=job_id, cwd=str(cwd), traceback=trace)
+        return 1
 
 
 def _parse_elapsed_seconds(value: str) -> Optional[int]:
@@ -1333,6 +1896,17 @@ def _print_review_gate_human(report: dict[str, Any]) -> None:
         print(f"- Blocking reason: {report['blocking_reason']}")
 
 
+def _print_review_status_human(report: dict[str, Any]) -> None:
+    print(f"Review status: {report['status']}")
+    print(f"- Job ID: {report['job_id']}")
+    print(f"- Tool: {report['tool_name']}")
+    if report["task_marker"]:
+        print(f"- Task marker: {report['task_marker']}")
+    if report["conversation_id"]:
+        print(f"- Conversation ID: {report['conversation_id']}")
+    print(f"- Artifact exists: {report['artifact_exists']}")
+
+
 def _print_cleanup_human(report: dict[str, Any]) -> None:
     print(f"Cleanup status: {report['status'].upper()}")
     print(f"- Scope: {report['scope']}")
@@ -1435,7 +2009,7 @@ def _probe_transport(transport_mode: str, timeout_seconds: int, script_path: Pat
         tools_response = _read_message_with_timeout(process.stdout, timeout_seconds, read_message)
         tools_elapsed_ms = round((time.perf_counter() - started) * 1000, 3)
         tool_names = [tool.get("name", "") for tool in tools_response.get("result", {}).get("tools", [])]
-        required_tools = {"codex", "codex_reply", "review_gate"}
+        required_tools = {"codex", "codex_reply", "review_gate", "review_status"}
         tools_ok = required_tools.issubset(set(tool_names))
         steps.append(
             {
@@ -1576,6 +2150,8 @@ def _handle_request(message: dict[str, Any]) -> Optional[dict[str, Any]]:
                 return _json_rpc_result(message_id, _handle_codex(arguments))
             if tool_name == "codex_reply":
                 return _json_rpc_result(message_id, _handle_codex_reply(arguments))
+            if tool_name == "review_status":
+                return _json_rpc_result(message_id, _handle_review_status(arguments))
             if tool_name == "review_gate":
                 return _json_rpc_result(message_id, _handle_review_gate(arguments))
             return _json_rpc_error(message_id, -32601, f"Unknown tool: {tool_name}")
@@ -1662,6 +2238,21 @@ TOOLS = [
             },
         },
     },
+    {
+        "name": "review_status",
+        "description": "Inspect the status of an asynchronous reviewer job.",
+        "inputSchema": {
+            "type": "object",
+            "additionalProperties": True,
+            "properties": {
+                "cwd": {"type": "string"},
+                "job_id": {"type": "string"},
+                "conversation_id": {"type": "string"},
+                "conversationId": {"type": "string"},
+                "task_marker": {"type": "string"},
+            },
+        },
+    },
 ]
 
 
@@ -1691,6 +2282,17 @@ def _build_parser() -> argparse.ArgumentParser:
     gate_parser.add_argument("--disallow-local-fallback", action="store_false", dest="allow_local_fallback", help="Require an MCP reviewer session.")
     gate_parser.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
 
+    status_parser = subparsers.add_parser("review-status", help="Inspect the status of a reviewer job.")
+    status_parser.add_argument("--cwd", default=os.getcwd(), help="Target repository root.")
+    status_parser.add_argument("--job-id", default=None, help="Reviewer job id.")
+    status_parser.add_argument("--conversation-id", default=None, help="Known conversation id.")
+    status_parser.add_argument("--task-marker", default=None, help="Known task marker.")
+    status_parser.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+
+    worker_parser = subparsers.add_parser("run-job", help="Run a persisted reviewer job in the background.")
+    worker_parser.add_argument("--cwd", required=True, help="Target repository root.")
+    worker_parser.add_argument("--job-id", required=True, help="Reviewer job id.")
+
     cleanup_parser = subparsers.add_parser("cleanup", help="Clean up stale reviewer wrapper processes.")
     cleanup_parser.add_argument("--scope", default=DEFAULT_CLEANUP_SCOPE, help="Cleanup scope. Only 'reviewer' is supported.")
     cleanup_parser.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
@@ -1700,6 +2302,10 @@ def _build_parser() -> argparse.ArgumentParser:
 
 def _run_server() -> int:
     _diagnostic_log("server_start", server_name=SERVER_NAME, protocol_version=PROTOCOL_VERSION, argv=sys.argv[1:])
+    try:
+        _run_job_janitor(Path(os.getcwd()).expanduser().resolve())
+    except Exception as exc:  # noqa: BLE001
+        _diagnostic_log("job_janitor_failed", cwd=os.getcwd(), error=str(exc), traceback=traceback.format_exc())
     while True:
         try:
             message = _read_message()
@@ -1765,6 +2371,20 @@ def _run_review_gate_command(args: argparse.Namespace) -> int:
     return 0 if report["gate_passed"] else 2
 
 
+def _run_review_status_command(args: argparse.Namespace) -> int:
+    report = _review_status_payload(
+        cwd=Path(args.cwd).expanduser().resolve(),
+        job_id=args.job_id,
+        conversation_id=args.conversation_id,
+        task_marker=args.task_marker,
+    )
+    if args.json:
+        print(json.dumps(report, ensure_ascii=False, indent=2))
+    else:
+        _print_review_status_human(report)
+    return 0
+
+
 def _run_cleanup_command(args: argparse.Namespace) -> int:
     report = _cleanup_report(args.scope)
     if args.json:
@@ -1786,6 +2406,10 @@ def main() -> int:
         return _run_probe_command(args)
     if args.command == "review-gate":
         return _run_review_gate_command(args)
+    if args.command == "review-status":
+        return _run_review_status_command(args)
+    if args.command == "run-job":
+        return _run_job_worker(Path(args.cwd).expanduser().resolve(), args.job_id)
     if args.command == "cleanup":
         return _run_cleanup_command(args)
     return _run_server()

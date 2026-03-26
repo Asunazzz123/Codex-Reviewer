@@ -255,7 +255,7 @@ Write-Host ("Copied codex-latest to {0}" -f (Convert-ToTomlPath $codexBinDir))
 Copy-TreeContent -SourceDir (Join-Path $projectRoot "skills") -DestinationDir $codexSkillsDir
 Write-Host ("Copied skills to {0}" -f (Convert-ToTomlPath $codexSkillsDir))
 
-Copy-TreeContent -SourceDir (Join-Path $projectRoot ".scripts") -DestinationDir $codexScriptsDir
+Copy-TreeContent -SourceDir (Join-Path $projectRoot "scripts") -DestinationDir $codexScriptsDir
 Write-Host ("Copied scripts to {0}" -f (Convert-ToTomlPath $codexScriptsDir))
 
 Write-Host "Running codex-reviewer doctor..."
