@@ -1,67 +1,172 @@
-# Codex Reviewer 迁移文档
-Codex 代码编写-代码审核 multi-agent, 参考[Claude Code+Codex协作开发文档](https://linux.do/t/topic/1003435?u=zhongruan)改造而成
+# Codex Reviewer Multi-Agent Framework
+
+基于 Codex 的“主 Codex 编写 + 审查 Codex 审核”协作框架。
 ## 内容
-```plaintext
+
+```text
 .
-├── .codex                           // 主agent与代码审核sub-agent的prompt
-│   ├── AGENTS.md
-│   └── CODEX.md
-├── scripts                         // 工具脚本，初始化后会迁移至~/.codex/scripts
-│   └── codex_reviewer_mcp.py
-├── base                             // 审核agent的校验器，初始化后会迁移至~/.codex/bin
-│   ├── codex-latest
-│   └── codex-latest.cmd
-├── README.md
-├── setting.ps1                      // windows的初始化脚本, 写入MCP服务器并迁移文件
-├── setting.sh                       // Linux/Macos的初始化脚本, 写入MCP服务器并迁移文件
-└── skills                           // mulit-agent SKILLS
-    ├── codex-reviewer-workflow
-    └── multi-codex-orchestrator
-
-
+├── .codex/                              # 项目内协作规范与 reviewer 产物目录
+│   ├── AGENTS.md                        # 审查 Codex 操作手册
+│   └── CODEX.md                         # 主 Codex 协作规范
+├── base/
+│   ├── codex-latest                     # macOS / Linux reviewer launcher
+│   └── codex-latest.cmd                 # Windows reviewer launcher
+├── scripts/
+│   └── codex_reviewer_mcp.py            # reviewer wrapper，仓库内 source of truth
+├── skills/
+│   ├── codex-reviewer-workflow/         # 审查 Codex 固定工作流 skill
+│   └── multi-codex-orchestrator/        # 主 Codex 编排 skill
+├── tests/
+│   ├── smoke_test_codex_reviewer_mcp.py # wrapper 端到端 smoke test
+│   └── test_codex_reviewer_wrapper.py   # wrapper 单元测试
+├── setting.ps1                          # Windows 初始化脚本
+├── setting.sh                           # macOS / Linux 初始化脚本
+└── README.md
 ```
 
+运行过程中，目标项目本地还会使用这些 `.codex/` 产物：
+
+- `.codex/context-initial.json`：首次上下文扫描结果
+- `.codex/review-report.md`：最终审查报告
+- `.codex/reviewer-jobs/`：异步 reviewer job 状态与诊断信息
+- `.codex/codex-reviewer-sessions.json`：`task_marker -> conversation_id` 会话映射
+
 ## 初始化
-Windows
+
+### 前置依赖
+
+- `conda`
+- `npx`
+- `python3` 或 `python`
+- 已安装可用的 Codex / VS Code ChatGPT 扩展运行环境
+
+### Windows
+
 ```powershell
 ./setting.ps1
 ```
 
-Linux/Macosx
-```
+### macOS / Linux
+
+```bash
 bash ./setting.sh
 ```
-全局配置通常不需要随项目切换而修改。需要代码审核的项目只需要准备自己的 `.codex`；跨仓库调用 reviewer 时把 `cwd` 指向目标仓库即可。只有 reviewer framework 仓库位置发生变化时，才需要更新 `CODEX_REVIEWER_FRAMEWORK_ROOT`。
 
-## 部署后健康检查
+### 可选环境变量
 
-- `setting.sh` / `setting.ps1` 现在会在复制配置与脚本后自动运行 `codex_reviewer_mcp.py doctor`。
-- wrapper 当前按 `2025-06-18` 协议响应 `initialize`，用于对齐当前 Codex 的 MCP 握手行为。
-- `doctor` 会检查 wrapper 健康状态、多个 `openai.chatgpt-*` 扩展版本并存、是否需要重启 VS Code/Codex 宿主，以及是否存在可清理的 stale reviewer wrapper 进程。
-- `probe --json` 会额外执行一遍本地 MCP 握手链路：`initialize -> notifications/initialized -> tools/list`。当你怀疑 “手工跑脚本没问题，但 Codex 还是注册不出工具” 时，优先先跑 `probe`。
-- 如果需要在安装后顺手清理陈旧 reviewer 进程，可设置 `CODEX_REVIEWER_CLEANUP_MODE=reviewer`；默认值是 `none`，只诊断不清理。
-- 如果需要抓取握手级别日志，可在运行 `setting.sh` / `setting.ps1` 之前导出 `CODEX_REVIEWER_LOG_PATH`。迁移脚本会把该变量写入 `codex-reviewer` 的 MCP env，但默认不会开启日志。
-- 默认不会自动结束 `codex app-server` 宿主进程；如果 `doctor` 提示宿主早于最新 `config.toml` / wrapper 更新，请完全重启 VS Code 或 Codex.app。
+初始化脚本支持这些覆盖项：
 
-## Reviewer Gate
+- `CODEX_HOME`
+- `CODEX_BINARY`
+- `CODEX_MODEL`
+- `CODEX_REASONING_EFFORT`
+- `CODEX_REVIEWER_FRAMEWORK_ROOT`
+- `CODEX_REVIEWER_LOG_PATH`
+- `CODEX_REVIEWER_CLEANUP_MODE`
+- `ENABLE_EXA`
+- `EXA_API_KEY`
+- `SHRIMP_DATA_DIR`
+- `CONDA_EXE`：仅 `setting.ps1` 使用
 
-- reviewer wrapper 现在同时提供 MCP 工具 `review_gate`，以及 CLI 子命令 `review-gate`、`doctor`、`probe`、`cleanup`。
-- 主 Codex 在最终交付前必须确认 reviewer gate 通过；如果 `codex-reviewer` MCP 不可用，可以降级到本地 reviewer，但仍必须产出 `./.codex/review-report.md` 后才能完成任务。
 
-## 推荐排障顺序
 
-1. 重新运行 `setting.sh` 或 `setting.ps1`，确保全局 `~/.codex/scripts/codex_reviewer_mcp.py` 与最新仓库脚本一致。
-2. 完全重启 VS Code / Codex 宿主，避免复用旧的 `app-server`。
-3. 手工执行 `codex_reviewer_mcp.py probe --json`，确认本地 wrapper 在 `2025-06-18` 协议下能完成 `tools/list`。
-4. 如果 `probe` 成功但 Codex 仍未注册出 `mcp__codex_reviewer__*`，再检查 `CODEX_REVIEWER_LOG_PATH` 指向的日志，确认宿主是否真的打到了 `initialize`。
+### 初始化脚本会做什么
 
-这个顺序是根据这些上游 issue 总结出来的：
+初始化脚本会把当前仓库内容迁移到全局 `~/.codex/`：
 
-- [openai/codex#14933](https://github.com/openai/codex/issues/14933)：手工 `initialize` 成功，不代表 Codex 宿主一定能真正使用该 MCP。
-- [openai/codex#5677](https://github.com/openai/codex/issues/5677)：新客户端会以 `2025-06-18` 握手，旧协议响应可能在 `tools/list` 前后触发失败。
-- [openai/codex#5671](https://github.com/openai/codex/issues/5671)：stdio MCP 在当前 Codex / rmcp 组合下对协议与 framing 更敏感，诊断日志要避免污染 `stdout`。
+- 生成 `~/.codex/config.toml`
 
-## 维护说明
+- 复制 `base/codex-latest*` 到 `~/.codex/bin/`
 
-- `scripts/codex_reviewer_mcp.py` 是仓库内的 source of truth。
-- 若保留仓库根目录的 `codex_reviewer_mcp.py` 镜像文件，请在修改 `scripts` 后同步它，避免阅读或手工调试时拿错版本。
+- 复制 `scripts/` 到 `~/.codex/scripts/`
+
+- 复制 `skills/` 到 `~/.codex/skills/`
+
+- 注册 `codex-reviewer`、`sequential-thinking`、`shrimp-task-manager`、`chrome-devtools`
+
+
+通常不需要为每个项目反复改全局配置。需要接入 reviewer 的项目只要准备自己的项目内 `.codex/` 即可；跨仓库使用时，把 MCP 调用的 `cwd` 指向目标仓库。
+
+## 使用方式
+在Codex CLI / VSCode Codex Plugin / Codex app(Only Macox)中输入
+```
+/skill Mult-Codex-Orchestrator <你的指令>
+```
+
+
+推荐工作流来自项目内 [CODEX.md](.codex/CODEX.md) 与 [AGENTS.md](.codex/AGENTS.md)：
+
+1. 主 Codex 先调用 `mcp__codex_reviewer__codex`
+2. 如果首次只返回 `job_id` 或 `conversation_id = null`，轮询 `mcp__codex_reviewer__review_status`
+3. 拿到 `conversation_id` 和 / 或 reviewer 产物后，继续主流程编码
+4. 编码后调用 `mcp__codex_reviewer__codex_reply`
+5. 再次轮询 `review_status`
+6. 最后调用 `mcp__codex_reviewer__review_gate`
+
+
+
+
+
+
+
+## 自动检查行为
+
+`setting.sh` / `setting.ps1` 在复制完脚本和配置后，会自动执行一次：
+
+```bash
+python3 ~/.codex/scripts/codex_reviewer_mcp.py doctor --cwd <project_root>
+```
+
+如果你设置了：
+
+```bash
+CODEX_REVIEWER_CLEANUP_MODE=reviewer
+```
+
+初始化脚本还会额外运行 stale reviewer cleanup。默认值是 `none`，只诊断不清理。
+
+## 验证命令
+
+仓库内当前的本地验证入口：
+
+```bash
+python3 -m py_compile scripts/codex_reviewer_mcp.py tests/test_codex_reviewer_wrapper.py tests/smoke_test_codex_reviewer_mcp.py
+python3 -B -m unittest tests/test_codex_reviewer_wrapper.py
+python3 -B tests/smoke_test_codex_reviewer_mcp.py
+python3 -B scripts/codex_reviewer_mcp.py probe --json
+```
+
+这些测试覆盖了：
+
+- MCP `initialize -> notifications/initialized -> tools/list`
+- 异步 `codex` / `codex_reply` job 排队与复用
+- `review_status` 查询优先级
+- `task_marker` 规范化
+- startup janitor 对 `stale` / `failed` job 的处理
+- `review_gate` 的本地与 MCP 收口逻辑
+
+
+## 已知行为
+
+根据当前仓库实现和实测结果，可以把这套系统视为“可用、可迁移的异步 reviewer 工作流”，但要注意它不是旧式同步 reviewer：
+
+- 首次 `codex` 调用可能先返回 `job_id`
+- `conversation_id` 可能稍后才由 `review_status` 补齐
+- 在远端 websocket 不稳定时，首轮 job 可能记成 `timeout`，但 artifact 和 `conversation_id` 仍可能已经落地
+- 因此调用方必须依赖 `review_status` 和 `review_gate`，不能只看首次调用结果
+
+## 常见问题
+
+-  当前VSCode 存在多个版本的Codex Plugin，会导致设置冲突
+
+### Linux/Macos
+```shell
+% agentframework % ls -1 ~/.vscode/extensions | rg -i openai
+```
+### Win
+```powershell
+Get-ChildItem "$env:USERPROFILE\.vscode\extensions" |
+Where-Object { $_.Name -match 'openai' } |
+Select-Object Name
+```
+如果存在两个以上的Plugin版本，删除其中一个并重启VSCode
