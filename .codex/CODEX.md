@@ -53,9 +53,10 @@
 3. `shrimp-task-manager` 生成任务计划
 4. 主 Codex 直接编码
 5. `mcp__codex_reviewer__codex_reply` 做复杂设计追问或最终审查
-6. 主 Codex 汇总结论、执行验证、写入最终决策
+6. `mcp__codex_reviewer__review_gate` 或其 CLI 等价检查必须通过
+7. 主 Codex 汇总结论、执行验证、写入最终决策
 
-如果任务足够简单，可以跳过复杂设计，但不能跳过最终审查。
+如果任务足够简单，可以跳过复杂设计，但不能跳过最终审查与 reviewer gate。
 
 ## 搜索与工具优先级
 
@@ -137,6 +138,17 @@ $codex-reviewer-workflow
 - 传入之前记录的 `conversation_id`
 - 用于补充问题、要求复审、追问结论依据
 
+### 完成前闸门
+
+- 工具：`mcp__codex_reviewer__review_gate`
+- 推荐参数：
+  - `cwd="<target-repo>"`
+  - `conversation_id="<wrapper 返回的真实会话 ID>"`，如果存在
+  - `artifact_path=".codex/review-report.md"`
+  - `allow_local_fallback=true`
+- 只有当 `gate_passed=true` 时，主 Codex 才能进入最终交付。
+- 如果 reviewer MCP 不可用，可以显式降级为本地 reviewer，但仍必须产出 `.codex/review-report.md` 并通过等价的本地 gate 检查。
+
 ### 会话管理
 
 - `codex-reviewer` wrapper 负责在项目本地 `.codex/codex-reviewer-sessions.json` 里记录：
@@ -213,6 +225,7 @@ $codex-reviewer-workflow
 - 主 Codex 先运行本地验证。
 - 然后将修改范围、验证结果和审查清单交给审查 Codex。
 - 审查 Codex 输出项目本地 `.codex/review-report.md`。
+- 主 Codex 必须执行 reviewer gate，确认审查已完成且报告存在。
 - 主 Codex 根据审查建议做最终决策并记录原因。
 
 ## 审查清单要求

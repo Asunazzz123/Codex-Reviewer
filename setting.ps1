@@ -7,6 +7,8 @@ $ErrorActionPreference = "Stop"
 # - CODEX_MODEL
 # - CODEX_REASONING_EFFORT
 # - CODEX_REVIEWER_FRAMEWORK_ROOT
+# - CODEX_REVIEWER_LOG_PATH
+# - CODEX_REVIEWER_CLEANUP_MODE
 # - ENABLE_EXA
 # - EXA_API_KEY
 # - SHRIMP_DATA_DIR
@@ -178,6 +180,8 @@ $codexReasoningEffortValue = if ($env:CODEX_REASONING_EFFORT) { $env:CODEX_REASO
 $shrimpDataDirValue = if ($env:SHRIMP_DATA_DIR) { $env:SHRIMP_DATA_DIR } else { ".shrimp" }
 $enableExaValue = if ($env:ENABLE_EXA) { $env:ENABLE_EXA } else { "0" }
 $exaApiKeyValue = if ($env:EXA_API_KEY) { $env:EXA_API_KEY } else { "your-exa-api-key" }
+$cleanupModeValue = if ($env:CODEX_REVIEWER_CLEANUP_MODE) { $env:CODEX_REVIEWER_CLEANUP_MODE } else { "none" }
+$reviewerLogPathValue = if ($env:CODEX_REVIEWER_LOG_PATH) { Convert-ToTomlPath $env:CODEX_REVIEWER_LOG_PATH } else { $null }
 
 $baseEnvPath = Convert-ToTomlPath (Join-PathList -Segments $baseEnvSegments)
 $mcpEnvPath = Convert-ToTomlPath (Join-PathList -Segments $mcpEnvSegments)
@@ -192,23 +196,15 @@ $pythonTomlPath = Convert-ToTomlPath $pythonPath
 $reviewerRootToml = Convert-ToTomlPath $reviewerRoot
 $codexBinaryToml = Convert-ToTomlPath $codexBinaryPath
 $userHomeToml = Convert-ToTomlPath $userHome
+$reviewerEnvLine = "env = { PATH = `"$reviewerEnvPath`", HOME = `"$userHomeToml`", USERPROFILE = `"$userHomeToml`", CODEX_BINARY = `"$codexBinaryToml`", CODEX_REVIEWER_FRAMEWORK_ROOT = `"$reviewerRootToml`""
+if (-not [string]::IsNullOrWhiteSpace($reviewerLogPathValue)) {
+    $reviewerEnvLine += ", CODEX_REVIEWER_LOG_PATH = `"$reviewerLogPathValue`""
+}
+$reviewerEnvLine += " }"
 
 New-Item -ItemType Directory -Force -Path $codexHomeDir, $codexBinDir, $codexScriptsDir, $codexSkillsDir | Out-Null
 
 $configLines = @(
-    "model = `"$codexModelValue`"",
-    "model_reasoning_effort = `"$codexReasoningEffortValue`"",
-    "",
-    "# $codexHomeToml/config.toml multi-codex MCP config for Windows + PowerShell",
-    "# Notes:",
-    "# 1. MCP servers run through local conda or Python.",
-    "# 2. Node-backed MCP servers use the current machine npx.",
-    "# 3. code-index still needs uvx and is intentionally not included here.",
-    "# 4. codex-reviewer uses the shared wrapper under ~/.codex/scripts/.",
-    "# 5. The wrapper writes reviewer artifacts into the target repository .codex/ directory.",
-    "",
-    "[mcp_servers]",
-    "",
     "[mcp_servers.sequential-thinking]",
     "type = `"stdio`"",
     "command = `"$condaTomlPath`"",
@@ -225,7 +221,10 @@ $configLines = @(
     "type = `"stdio`"",
     "command = `"$pythonTomlPath`"",
     "args = [`"$codexScriptsToml/codex_reviewer_mcp.py`"]",
-    "env = { PATH = `"$reviewerEnvPath`", HOME = `"$userHomeToml`", USERPROFILE = `"$userHomeToml`", CODEX_BINARY = `"$codexBinaryToml`", CODEX_REVIEWER_FRAMEWORK_ROOT = `"$reviewerRootToml`" }",
+    "cwd = `"$reviewerRootToml`"",
+    $reviewerEnvLine,
+    "startup_timeout_sec = 300",
+    "tool_timeout_sec = 900",
     "",
     "[mcp_servers.chrome-devtools]",
     "type = `"stdio`"",
@@ -258,3 +257,17 @@ Write-Host ("Copied skills to {0}" -f (Convert-ToTomlPath $codexSkillsDir))
 
 Copy-TreeContent -SourceDir (Join-Path $projectRoot ".scripts") -DestinationDir $codexScriptsDir
 Write-Host ("Copied scripts to {0}" -f (Convert-ToTomlPath $codexScriptsDir))
+
+Write-Host "Running codex-reviewer doctor..."
+& $pythonPath (Join-Path $codexScriptsDir "codex_reviewer_mcp.py") doctor --cwd $projectRoot
+if ($LASTEXITCODE -ne 0) {
+    throw "codex-reviewer doctor reported an error."
+}
+
+if ($cleanupModeValue -eq "reviewer") {
+    Write-Host "Cleaning up stale reviewer wrapper processes..."
+    & $pythonPath (Join-Path $codexScriptsDir "codex_reviewer_mcp.py") cleanup --scope reviewer
+}
+else {
+    Write-Host ("Skipping reviewer cleanup (CODEX_REVIEWER_CLEANUP_MODE={0})" -f $cleanupModeValue)
+}

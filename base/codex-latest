@@ -3,11 +3,14 @@ set -eu
 
 extensions_dir="${HOME}/.vscode/extensions"
 latest_codex=""
+candidate_count=0
 
 for candidate in "${extensions_dir}"/openai.chatgpt-*-darwin-arm64/bin/macos-aarch64/codex; do
   if [ ! -x "${candidate}" ]; then
     continue
   fi
+
+  candidate_count=$((candidate_count + 1))
 
   if [ -z "${latest_codex}" ] || [ "${candidate}" -nt "${latest_codex}" ]; then
     latest_codex="${candidate}"
@@ -17,6 +20,11 @@ done
 if [ -z "${latest_codex}" ]; then
   echo "codex-latest: no executable codex binary found under ${extensions_dir}" >&2
   exit 1
+fi
+
+if [ "${candidate_count}" -gt 1 ]; then
+  echo "codex-latest: warning: multiple openai.chatgpt extension binaries were found under ${extensions_dir}" >&2
+  echo "codex-latest: selected ${latest_codex}" >&2
 fi
 
 exec "${latest_codex}" "$@"

@@ -18,7 +18,8 @@ Use this skill when the current Codex instance is the main executor and must coo
    - State the task type and the artifact path under `./.codex/`.
 4. Keep implementation, validation, and final product decisions in the main Codex session unless project rules explicitly say otherwise.
 5. After coding and local validation, send a follow-up review request with `mcp__codex_reviewer__codex_reply` using the `structuredContent.conversation_id` returned by the first reviewer call.
-6. If the `codex-reviewer` MCP tool is unavailable, say so clearly and continue with a local review instead of silently skipping the review step.
+6. Before final delivery, call `mcp__codex_reviewer__review_gate` and do not finish unless it reports `gate_passed=true`.
+7. If the `codex-reviewer` MCP tool is unavailable, say so clearly, switch to a local reviewer fallback, and still block completion until `./.codex/review-report.md` exists and the equivalent local review gate passes.
 
 ## Initial Reviewer Prompt Template
 
@@ -46,3 +47,4 @@ Output requirements:
 - Include validation commands already run.
 - Include focus areas and non-negotiable risks.
 - Read the reviewer artifact before making the final decision.
+- Run the reviewer gate check after the final review step and treat it as a completion blocker.

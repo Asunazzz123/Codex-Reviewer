@@ -1,2 +1,7 @@
-tests/*
+tests/__pycache__/
 .codex/context-initial.json
+./pytest_cache
+codex.log
+codex_reviewer_mcp.patch
+config.toml
+.codex/*.json

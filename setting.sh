@@ -7,6 +7,8 @@ set -eu
 # - CODEX_MODEL
 # - CODEX_REASONING_EFFORT
 # - CODEX_REVIEWER_FRAMEWORK_ROOT
+# - CODEX_REVIEWER_LOG_PATH
+# - CODEX_REVIEWER_CLEANUP_MODE
 # - ENABLE_EXA
 # - EXA_API_KEY
 # - SHRIMP_DATA_DIR
@@ -93,12 +95,20 @@ MCP_ENV_PATH=$(append_path_if_dir "$BASE_ENV_PATH" "$VSCODE_CODEX_DIR")
 REVIEWER_ENV_PATH="$BASE_ENV_PATH"
 
 REVIEWER_ROOT=${CODEX_REVIEWER_FRAMEWORK_ROOT:-"$PROJECT_ROOT"}
+REVIEWER_LOG_PATH_VALUE=${CODEX_REVIEWER_LOG_PATH:-}
 CODEX_BINARY_PATH=${CODEX_BINARY:-"$CODEX_HOME_DIR/bin/codex-latest"}
 CODEX_MODEL_VALUE=${CODEX_MODEL:-"gpt-5.4"}
 CODEX_REASONING_EFFORT_VALUE=${CODEX_REASONING_EFFORT:-"xhigh"}
 SHRIMP_DATA_DIR_VALUE=${SHRIMP_DATA_DIR:-".shrimp"}
 ENABLE_EXA_VALUE=${ENABLE_EXA:-"0"}
 EXA_API_KEY_VALUE=${EXA_API_KEY:-"your-exa-api-key"}
+CLEANUP_MODE_VALUE=${CODEX_REVIEWER_CLEANUP_MODE:-"none"}
+
+REVIEWER_ENV_LINE="env = { PATH = \"${REVIEWER_ENV_PATH}\", HOME = \"${HOME}\", CODEX_BINARY = \"${CODEX_BINARY_PATH}\", CODEX_REVIEWER_FRAMEWORK_ROOT = \"${REVIEWER_ROOT}\""
+if [ -n "$REVIEWER_LOG_PATH_VALUE" ]; then
+  REVIEWER_ENV_LINE="${REVIEWER_ENV_LINE}, CODEX_REVIEWER_LOG_PATH = \"${REVIEWER_LOG_PATH_VALUE}\""
+fi
+REVIEWER_ENV_LINE="${REVIEWER_ENV_LINE} }"
 
 mkdir -p "$CODEX_HOME_DIR"
 mkdir -p "$CODEX_BIN_DIR"
@@ -135,7 +145,17 @@ env = { PATH = "${MCP_ENV_PATH}", HOME = "${HOME}", DATA_DIR = "${SHRIMP_DATA_DI
 type = "stdio"
 command = "${PYTHON_PATH}"
 args = ["${CODEX_SCRIPTS_DIR}/codex_reviewer_mcp.py"]
-env = { PATH = "${REVIEWER_ENV_PATH}", HOME = "${HOME}", CODEX_BINARY = "${CODEX_BINARY_PATH}", CODEX_REVIEWER_FRAMEWORK_ROOT = "${REVIEWER_ROOT}" }
+cwd = "${REVIEWER_ROOT}"
+env = {
+  PATH = "${REVIEWER_ENV_PATH}",
+  HOME = "${HOME}",
+  CODEX_BINARY = "${CODEX_BINARY_PATH}",
+  CODEX_REVIEWER_FRAMEWORK_ROOT = "${REVIEWER_ROOT}",
+  CODEX_REVIEWER_LOG_PATH = "${CODEX_HOME_DIR}/logs/codex-reviewer.jsonl",
+  PYTHONUNBUFFERED = "1"
+}
+startup_timeout_sec = 300
+tool_timeout_sec = 900
 
 [mcp_servers.chrome-devtools]
 type = "stdio"
@@ -167,3 +187,12 @@ echo "Copied skills to ${CODEX_SKILLS_DIR}"
 cp -r "${PROJECT_ROOT}/.scripts/." "$CODEX_SCRIPTS_DIR/"
 echo "Copied scripts to ${CODEX_SCRIPTS_DIR}"
 
+echo "Running codex-reviewer doctor..."
+"$PYTHON_PATH" "${CODEX_SCRIPTS_DIR}/codex_reviewer_mcp.py" doctor --cwd "$PROJECT_ROOT"
+
+if [ "$CLEANUP_MODE_VALUE" = "reviewer" ]; then
+  echo "Cleaning up stale reviewer wrapper processes..."
+  "$PYTHON_PATH" "${CODEX_SCRIPTS_DIR}/codex_reviewer_mcp.py" cleanup --scope reviewer
+else
+  echo "Skipping reviewer cleanup (CODEX_REVIEWER_CLEANUP_MODE=${CLEANUP_MODE_VALUE})"
+fi
