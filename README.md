@@ -38,7 +38,7 @@
 - `conda`
 - `npx`
 - `python3` 或 `python`
-- 已安装可用的 Codex / VS Code ChatGPT 扩展运行环境
+- 已安装可用的 Codex CLI / VS Code Codex Plugin / Codex app(macOS only)
 
 ### Windows
 
@@ -88,7 +88,7 @@ bash ./setting.sh
 通常不需要为每个项目反复改全局配置。需要接入 reviewer 的项目只要准备自己的项目内 `.codex/` 即可；跨仓库使用时，把 MCP 调用的 `cwd` 指向目标仓库。
 
 ## 使用方式
-在Codex CLI / VSCode Codex Plugin / Codex app(Only Macox)中输入
+在Codex CLI / VSCode Codex Plugin / Codex app(macOS only)中输入
 ```
 /skill Mult-Codex-Orchestrator <你的指令>
 ```
